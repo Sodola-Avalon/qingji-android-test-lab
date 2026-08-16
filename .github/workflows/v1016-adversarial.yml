@@ -1,0 +1,274 @@
+name: QingJi v1.0.16 adversarial
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.ci/v1.0.16/**'
+      - '.github/workflows/v1016-adversarial.yml'
+
+jobs:
+  adversarial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct exact v1.0.16 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .ci/v1.0.16/patch.b64.?? | tr -d '\r\n' | base64 -d > candidate.patch.zst
+          cp QingJi-v1.0.15.apk base-v1.0.15.apk
+          zstd --patch-from=base-v1.0.15.apk -d -f candidate.patch.zst -o QingJi-v1.0.16.apk
+          echo '8e51e396345d5cc6a4d390bf519d7ba321eafe0c944b30ec9f671b40254ededa  QingJi-v1.0.16.apk' | sha256sum -c -
+          ls -l QingJi-v1.0.16.apk
+
+      - name: Prepare Android emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ ! -e /dev/kvm ] || sudo chmod 666 /dev/kvm
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort | tail -1)"
+          AVDMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name avdmanager | sort | tail -1)"
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "AVDMANAGER=$AVDMANAGER" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.android/avd"
+          echo "ANDROID_AVD_HOME=$HOME/.android/avd" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install 'platform-tools' 'emulator' 'system-images;android-35;google_apis;x86_64'
+          echo no | "$AVDMANAGER" create avd --force --name qingji \
+            --package 'system-images;android-35;google_apis;x86_64' --device 'pixel_6'
+          ACCEL='-accel off'; [ ! -e /dev/kvm ] || ACCEL='-accel on'
+          nohup "$ANDROID_HOME/emulator/emulator" -avd qingji \
+            -no-window -noaudio -no-boot-anim -no-snapshot -wipe-data \
+            -gpu swiftshader_indirect $ACCEL > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          adb wait-for-device
+          for i in $(seq 1 180); do
+            [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = '1' ] && break
+            sleep 2
+          done
+          test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = '1'
+          adb shell settings put global stay_on_while_plugged_in 3 || true
+          adb shell settings put system screen_off_timeout 1800000
+          adb shell wm size 1080x2400
+          adb shell wm density 420
+          adb shell settings put system font_scale 1.0
+          adb shell input keyevent KEYCODE_WAKEUP || true
+          adb shell wm dismiss-keyguard || true
+          adb shell input keyevent KEYCODE_HOME || true
+
+      - name: Install final candidate and helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          adb install -r QingJi-v1.0.16.apk
+          adb shell dumpsys package com.qinghao.qingji | grep -q 'versionName=1.0.16'
+          cat > /tmp/qj-ui.sh <<'SH'
+          dump_ui() {
+            local out="${1:-current-ui.xml}"
+            adb shell uiautomator dump /data/local/tmp/qj.xml >/dev/null 2>&1 || true
+            adb exec-out cat /data/local/tmp/qj.xml > "$out"
+          }
+          center_by() {
+            local attr="$1" value="$2"
+            dump_ui /tmp/current-ui.xml
+            python3 - "$attr" "$value" <<'PY'
+          import re,sys,xml.etree.ElementTree as ET
+          attr,value=sys.argv[1],sys.argv[2]
+          root=ET.parse('/tmp/current-ui.xml').getroot()
+          for n in root.iter('node'):
+              if n.attrib.get(attr,'')==value:
+                  m=re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',n.attrib.get('bounds',''))
+                  if m:
+                      x1,y1,x2,y2=map(int,m.groups()); print((x1+x2)//2,(y1+y2)//2); raise SystemExit
+          raise SystemExit(2)
+          PY
+          }
+          tap_by() { read -r X Y < <(center_by "$1" "$2"); adb shell input tap "$X" "$Y"; }
+          launch_qj() {
+            adb shell input keyevent KEYCODE_HOME >/dev/null 2>&1 || true
+            adb shell monkey -p com.qinghao.qingji -c android.intent.category.LAUNCHER 1 >/dev/null
+            sleep 1
+          }
+          grant_all() {
+            adb shell pm grant com.qinghao.qingji android.permission.POST_NOTIFICATIONS || true
+            adb shell appops set com.qinghao.qingji SCHEDULE_EXACT_ALARM allow || true
+          }
+          reset_qj() {
+            adb shell pm clear com.qinghao.qingji >/dev/null
+            grant_all
+            launch_qj
+          }
+          set_picker_time() {
+            local offset="$1"
+            local H M NOW TARGET TH TM TH2 TM2
+            H="$(adb shell date +%H | tr -d '\r')"; M="$(adb shell date +%M | tr -d '\r')"
+            NOW=$((10#$H*60+10#$M)); TARGET=$(((NOW+offset)%1440)); TH=$((TARGET/60)); TM=$((TARGET%60))
+            printf -v TH2 '%02d' "$TH"; printf -v TM2 '%02d' "$TM"
+            echo "$TH2:$TM2"
+            tap_by text '无'; sleep .5
+            tap_by content-desc 'Switch to text input mode for the time input.'; sleep .4
+            if center_by resource-id 'android:id/input_hour' >/tmp/hc 2>/dev/null; then read -r X Y </tmp/hc; else read -r X Y < <(center_by resource-id 'android:id/hours'); fi
+            adb shell input tap "$X" "$Y"; adb shell input keyevent KEYCODE_MOVE_END; adb shell input keyevent KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL || true; adb shell input text "$TH2"
+            if center_by resource-id 'android:id/input_minute' >/tmp/mc 2>/dev/null; then read -r X Y </tmp/mc; else read -r X Y < <(center_by resource-id 'android:id/minutes'); fi
+            adb shell input tap "$X" "$Y"; adb shell input keyevent KEYCODE_MOVE_END; adb shell input keyevent KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL || true; adb shell input text "$TM2"
+            adb shell input keyevent KEYCODE_BACK || true; sleep .2; tap_by text 'OK'; sleep .5
+          }
+          create_timed_task() {
+            local name="$1" offset="$2"
+            tap_by content-desc '添加任务，长按打开快捷功能'; sleep .4
+            adb shell input text "$name"; sleep .2
+            local target; target="$(set_picker_time "$offset" | head -1)"
+            echo "$name target=$target" >> reminder-targets.txt
+            tap_by text '添加'; sleep .8
+          }
+          SH
+
+      - name: Round 1 - paging geometry and basic regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /tmp/qj-ui.sh
+          reset_qj
+          tap_by content-desc '添加任务，长按打开快捷功能'; adb shell input text CI_Geometry; tap_by text '添加'; sleep .6
+          adb exec-out screencap -p > r1-home.png
+
+          adb shell input swipe 540 850 540 1500 5000 >/dev/null 2>&1 & P=$!; sleep 2.9
+          dump_ui r1-prev.xml; adb exec-out screencap -p > r1-prev.png; wait $P || true; sleep .6
+          adb shell input tap 930 2000 || true; sleep .4
+          adb shell input swipe 540 1600 540 850 5000 >/dev/null 2>&1 & P=$!; sleep 2.9
+          dump_ui r1-next.xml; adb exec-out screencap -p > r1-next.png; wait $P || true
+
+          python3 <<'PY'
+          import re,xml.etree.ElementTree as ET
+          def rect(n):
+              m=re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',n.attrib['bounds']); return tuple(map(int,m.groups()))
+          def nodes(path): return list(ET.parse(path).getroot().iter('node'))
+          p=nodes('r1-prev.xml'); q=nodes('r1-next.xml')
+          hp=next(n for n in p if '查看上一' in n.attrib.get('text',''))
+          hq=next(n for n in q if '查看下一' in n.attrib.get('text',''))
+          header=max(rect(n)[3] for n in p if n.attrib.get('content-desc') in ('切换今日、本周、本月或本年','设置'))
+          fab=next(n for n in q if n.attrib.get('content-desc')=='添加任务，长按打开快捷功能')
+          py=(rect(hp)[1]+rect(hp)[3])//2; qy=(rect(hq)[1]+rect(hq)[3])//2; ftop=rect(fab)[1]
+          print('prev_hint_y=',py,'header_bottom=',header,'next_hint_y=',qy,'fab_top=',ftop)
+          assert py > header, '上一周期提示仍压在顶部按钮区域'
+          assert py < 900, '上一周期提示过低'
+          assert qy > 1100, '下一周期提示仍停留在页面上半部'
+          assert rect(hq)[3] < ftop-20, '下一周期提示侵入 + 按钮区域'
+          PY
+          echo 'ROUND1_PASS' | tee r1-result.txt
+
+      - name: Round 2 - recurring delete dialog adversarial regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /tmp/qj-ui.sh
+          reset_qj
+          tap_by content-desc '添加任务，长按打开快捷功能'; sleep .3
+          adb shell input text CI_Repeat; tap_by text '每日重复'; tap_by text '添加'; sleep .8
+          read -r TX TY < <(center_by text 'CI_Repeat')
+          adb shell input swipe 850 "$TY" 300 "$TY" 650; sleep .5
+          tap_by content-desc '删除'; sleep .5
+          dump_ui r2-delete.xml; adb exec-out screencap -p > r2-delete.png
+          grep -q '仅删除这一天' r2-delete.xml
+          grep -q '停止每日重复' r2-delete.xml
+          grep -q '取消' r2-delete.xml
+          tap_by text '仅删除这一天'; sleep .8
+          dump_ui r2-after-only-today.xml
+          if grep -q 'text="CI_Repeat"' r2-after-only-today.xml; then echo 'current occurrence still visible' >&2; exit 1; fi
+          echo 'ROUND2_PASS' | tee r2-result.txt
+
+      - name: Round 3 - exact reminder survives process death
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /tmp/qj-ui.sh
+          reset_qj
+          adb logcat -c
+          create_timed_task CI_Kill 2
+          adb shell dumpsys alarm > r3-alarm-before.txt
+          grep -q 'com.qinghao.qingji' r3-alarm-before.txt
+          adb shell input keyevent KEYCODE_HOME; adb shell am kill com.qinghao.qingji; sleep 1
+          adb shell dumpsys alarm > r3-alarm-after-kill.txt
+          grep -q 'com.qinghao.qingji' r3-alarm-after-kill.txt
+          FIRED=0
+          for i in $(seq 1 36); do
+            adb logcat -d -v brief -s QingJiReminder:I '*:S' > r3-reminder-live.txt 2>&1 || true
+            if grep -q 'notification posted' r3-reminder-live.txt; then FIRED=1; break; fi
+            sleep 5
+          done
+          adb shell dumpsys notification --noredact > r3-notifications.txt 2>&1 || true
+          adb shell cmd statusbar expand-notifications || true; sleep .6; adb exec-out screencap -p > r3-notification.png || true; adb shell cmd statusbar collapse || true
+          test "$FIRED" -eq 1
+          grep -q 'CI_Kill' r3-notifications.txt
+          echo 'ROUND3_PASS' | tee r3-result.txt
+
+      - name: Round 4 - denied permissions, recovery, and completed-task cancellation
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /tmp/qj-ui.sh
+          adb shell pm clear com.qinghao.qingji >/dev/null
+          adb shell pm revoke com.qinghao.qingji android.permission.POST_NOTIFICATIONS || true
+          adb shell appops set com.qinghao.qingji SCHEDULE_EXACT_ALARM deny || true
+          launch_qj
+          create_timed_task CI_Denied 5 || true
+          sleep .5
+          dump_ui r4-permission.xml; adb exec-out screencap -p > r4-permission.png || true
+          adb shell input keyevent KEYCODE_BACK || true; sleep .4
+          adb shell dumpsys alarm > r4-inexact-alarm.txt
+          grep -q 'com.qinghao.qingji' r4-inexact-alarm.txt
+          if adb shell pidof com.qinghao.qingji >/dev/null; then echo 'app_alive_after_permission_denial=1' > r4-recovery.txt; else echo 'app_alive_after_permission_denial=0' > r4-recovery.txt; fi
+
+          adb shell pm grant com.qinghao.qingji android.permission.POST_NOTIFICATIONS || true
+          adb shell appops set com.qinghao.qingji SCHEDULE_EXACT_ALARM allow || true
+          launch_qj; sleep .7
+          adb shell dumpsys alarm > r4-exact-after-grant.txt
+          grep -q 'com.qinghao.qingji' r4-exact-after-grant.txt
+
+          adb shell pm clear com.qinghao.qingji >/dev/null; grant_all; launch_qj; adb logcat -c
+          create_timed_task CI_Cancel 2
+          tap_by content-desc '完成任务'; sleep .8
+          adb shell dumpsys alarm > r4-after-complete.txt
+          adb shell input keyevent KEYCODE_HOME; adb shell am kill com.qinghao.qingji || true
+          sleep 135
+          adb logcat -d -v brief -s QingJiReminder:I '*:S' > r4-cancel-log.txt 2>&1 || true
+          if grep -q 'CI_Cancel' r4-cancel-log.txt && grep -q 'notification posted' r4-cancel-log.txt; then echo 'completed task still notified' >&2; exit 1; fi
+          adb shell dumpsys notification --noredact > r4-notifications.txt 2>&1 || true
+          if grep -q 'CI_Cancel' r4-notifications.txt; then echo 'completed task notification exists' >&2; exit 1; fi
+          echo 'ROUND4_PASS' | tee r4-result.txt
+
+      - name: Collect diagnostics
+        if: always()
+        shell: bash
+        run: |
+          adb shell dumpsys package com.qinghao.qingji > package.txt 2>&1 || true
+          adb shell dumpsys alarm > alarms-final.txt 2>&1 || true
+          adb shell dumpsys notification --noredact > notifications-final.txt 2>&1 || true
+          adb shell cmd appops get com.qinghao.qingji > appops-final.txt 2>&1 || true
+          adb logcat -d -v time > logcat-final.txt 2>&1 || true
+          sha256sum QingJi-v1.0.16.apk > candidate-sha256.txt || true
+
+      - name: Upload adversarial results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qingji-v1.0.16-adversarial
+          path: |
+            r1-*
+            r2-*
+            r3-*
+            r4-*
+            package.txt
+            alarms-final.txt
+            notifications-final.txt
+            appops-final.txt
+            logcat-final.txt
+            candidate-sha256.txt
+            reminder-targets.txt
+            ${{ runner.temp }}/emulator.log
+          if-no-files-found: ignore
+          retention-days: 5
