@@ -21,8 +21,6 @@ jobs:
           if [ -e /dev/kvm ]; then
             sudo chmod 666 /dev/kvm
             echo 'KVM is available.'
-          else
-            echo 'KVM is not available; emulator will use software acceleration.'
           fi
 
       - name: Locate Android command-line tools
@@ -45,21 +43,14 @@ jobs:
         run: |
           set -euo pipefail
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          "$SDKMANAGER" --install \
-            'platform-tools' \
-            'emulator' \
-            'system-images;android-35;google_apis;x86_64'
+          "$SDKMANAGER" --install 'platform-tools' 'emulator' 'system-images;android-35;google_apis;x86_64'
 
       - name: Create AVD
         shell: bash
         run: |
           set -euo pipefail
-          echo no | "$AVDMANAGER" create avd \
-            --force \
-            --name qingji \
-            --package 'system-images;android-35;google_apis;x86_64' \
-            --device 'pixel_6'
-          "$AVDMANAGER" list avd
+          echo no | "$AVDMANAGER" create avd --force --name qingji \
+            --package 'system-images;android-35;google_apis;x86_64' --device 'pixel_6'
 
       - name: Boot emulator
         shell: bash
@@ -69,12 +60,10 @@ jobs:
           if [ -e /dev/kvm ]; then ACCEL='-accel on'; fi
           nohup "$ANDROID_HOME/emulator/emulator" -avd qingji \
             -no-window -noaudio -no-boot-anim -no-snapshot -wipe-data \
-            -gpu swiftshader_indirect $ACCEL \
-            > "$RUNNER_TEMP/emulator.log" 2>&1 &
+            -gpu swiftshader_indirect $ACCEL > "$RUNNER_TEMP/emulator.log" 2>&1 &
           adb wait-for-device
           for i in $(seq 1 180); do
-            BOOT="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
-            if [ "$BOOT" = '1' ]; then break; fi
+            [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = '1' ] && break
             sleep 2
           done
           test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = '1'
@@ -85,75 +74,193 @@ jobs:
           adb shell settings put system font_scale 1.0
           adb shell input keyevent KEYCODE_WAKEUP || true
           adb shell wm dismiss-keyguard || true
-          adb shell input swipe 540 1900 540 500 300 || true
           adb shell input keyevent KEYCODE_HOME || true
           sleep 2
           adb exec-out screencap -p > emulator-home.png
-          test -s emulator-home.png
 
       - name: Install and launch QingJi APK
         shell: bash
         run: |
           set -euo pipefail
-          APK="$(find . -maxdepth 2 -type f -name '*.apk' | head -1 || true)"
-          test -n "$APK"
-          echo "Testing APK: $APK"
+          APK="$(find . -maxdepth 2 -type f -name '*.apk' | head -1)"
           adb install -r "$APK"
           adb shell pm grant com.qinghao.qingji android.permission.POST_NOTIFICATIONS || true
-          adb shell cmd appops get com.qinghao.qingji SCHEDULE_EXACT_ALARM > appops-before.txt 2>&1 || true
+          adb shell appops set com.qinghao.qingji SCHEDULE_EXACT_ALARM allow > exact-alarm-grant.txt 2>&1 || true
+          adb shell appops get com.qinghao.qingji SCHEDULE_EXACT_ALARM >> exact-alarm-grant.txt 2>&1 || true
           adb logcat -c
           adb shell monkey -p com.qinghao.qingji -c android.intent.category.LAUNCHER 1
           sleep 3
-          adb shell uiautomator dump /data/local/tmp/window.xml || true
+          adb shell uiautomator dump /data/local/tmp/window.xml >/dev/null || true
           adb exec-out cat /data/local/tmp/window.xml > window.xml || true
           adb exec-out screencap -p > qingji-home.png
-          test -s qingji-home.png
 
-      - name: Exercise vertical paging preview
+      - name: Capture vertical paging previews
         shell: bash
         run: |
           set -u
-          # Pull down: previous day. Keep finger down while taking the screenshot.
-          adb shell input motionevent DOWN 540 900 || true
-          adb shell input motionevent MOVE 540 1280 || true
-          sleep 0.25
+          # Keep the swipe command alive in the background so the screenshot is taken before ACTION_UP.
+          adb shell input swipe 540 900 540 1400 2200 >/dev/null 2>&1 &
+          P=$!
+          sleep 1.15
           adb exec-out screencap -p > pull-previous.png || true
-          adb shell input motionevent UP 540 1280 || true
+          wait $P || true
           sleep 1
 
-          # Pull up: next day. Keep finger down while taking the screenshot.
-          adb shell input motionevent DOWN 540 1550 || true
-          adb shell input motionevent MOVE 540 1170 || true
-          sleep 0.25
+          adb shell input swipe 540 1550 540 1000 2200 >/dev/null 2>&1 &
+          P=$!
+          sleep 1.15
           adb exec-out screencap -p > pull-next.png || true
-          adb shell input motionevent UP 540 1170 || true
+          wait $P || true
           sleep 1
 
-      - name: Inspect add-task and reminder dialogs
+          # Return to today in case a swipe crossed the threshold and switched dates.
+          adb shell input tap 930 2090 || true
+          sleep 1
+
+      - name: Create a task reminder through the real UI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dump_ui() {
+            adb shell uiautomator dump /data/local/tmp/current-ui.xml >/dev/null 2>&1 || true
+            adb exec-out cat /data/local/tmp/current-ui.xml > current-ui.xml
+          }
+
+          center_by() {
+            local attr="$1" value="$2"
+            dump_ui
+            python3 - "$attr" "$value" <<'PY'
+          import re, sys, xml.etree.ElementTree as ET
+          attr, value = sys.argv[1], sys.argv[2]
+          root = ET.parse('current-ui.xml').getroot()
+          for n in root.iter('node'):
+              if n.attrib.get(attr, '') == value:
+                  m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', n.attrib.get('bounds',''))
+                  if m:
+                      x1,y1,x2,y2 = map(int,m.groups())
+                      print((x1+x2)//2, (y1+y2)//2)
+                      raise SystemExit(0)
+          raise SystemExit(2)
+          PY
+          }
+
+          tap_by() {
+            read -r X Y < <(center_by "$1" "$2")
+            adb shell input tap "$X" "$Y"
+          }
+
+          # Target is three minutes ahead so there is time to finish UI automation and kill the process.
+          H="$(adb shell date +%H | tr -d '\r')"
+          M="$(adb shell date +%M | tr -d '\r')"
+          NOW_MIN=$((10#$H * 60 + 10#$M))
+          TARGET_MIN=$(((NOW_MIN + 3) % 1440))
+          TH=$((TARGET_MIN / 60))
+          TM=$((TARGET_MIN % 60))
+          printf -v TH2 '%02d' "$TH"
+          printf -v TM2 '%02d' "$TM"
+          echo "device_now=$H:$M target=$TH2:$TM2" | tee reminder-target.txt
+
+          # Add dialog and name.
+          tap_by content-desc '添加任务，长按打开快捷功能'
+          sleep 0.7
+          adb shell input text CI_Reminder
+          sleep 0.3
+          adb shell uiautomator dump /data/local/tmp/add-dialog.xml >/dev/null || true
+          adb exec-out cat /data/local/tmp/add-dialog.xml > add-dialog.xml || true
+          adb exec-out screencap -p > add-dialog.png
+
+          # Open reminder picker and switch to numeric input mode.
+          tap_by text '无'
+          sleep 0.7
+          adb shell uiautomator dump /data/local/tmp/time-picker.xml >/dev/null || true
+          adb exec-out cat /data/local/tmp/time-picker.xml > time-picker.xml || true
+          adb exec-out screencap -p > time-picker.png
+          tap_by content-desc 'Switch to text input mode for the time input.'
+          sleep 0.5
+          adb shell uiautomator dump /data/local/tmp/time-input.xml >/dev/null || true
+          adb exec-out cat /data/local/tmp/time-input.xml > time-input.xml || true
+          adb exec-out screencap -p > time-input.png || true
+
+          # Set hour field.
+          if center_by resource-id 'android:id/input_hour' >/tmp/hour-center 2>/dev/null; then
+            read -r X Y < /tmp/hour-center
+          else
+            read -r X Y < <(center_by resource-id 'android:id/hours')
+          fi
+          adb shell input tap "$X" "$Y"
+          adb shell input keyevent KEYCODE_MOVE_END
+          adb shell input keyevent KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL || true
+          adb shell input text "$TH2"
+
+          # Set minute field.
+          if center_by resource-id 'android:id/input_minute' >/tmp/min-center 2>/dev/null; then
+            read -r X Y < /tmp/min-center
+          else
+            read -r X Y < <(center_by resource-id 'android:id/minutes')
+          fi
+          adb shell input tap "$X" "$Y"
+          adb shell input keyevent KEYCODE_MOVE_END
+          adb shell input keyevent KEYCODE_DEL KEYCODE_DEL KEYCODE_DEL || true
+          adb shell input text "$TM2"
+          adb shell input keyevent KEYCODE_BACK || true
+          sleep 0.3
+          tap_by text 'OK'
+          sleep 0.7
+
+          # Save task.
+          adb shell uiautomator dump /data/local/tmp/add-ready.xml >/dev/null || true
+          adb exec-out cat /data/local/tmp/add-ready.xml > add-ready.xml || true
+          adb exec-out screencap -p > add-ready.png || true
+          tap_by text '添加'
+          sleep 1
+
+          # If special access dialog appears despite appops, choose 暂不 so the test still continues.
+          dump_ui
+          if grep -q '允许准点提醒' current-ui.xml; then
+            tap_by text '暂不' || true
+            sleep 0.5
+          fi
+
+          adb exec-out screencap -p > task-created.png || true
+          adb shell dumpsys alarm > alarms-before-kill.txt
+          grep -i -C 12 'com.qinghao.qingji\|QingJi' alarms-before-kill.txt > qingji-alarms-before-kill.txt || true
+
+      - name: Verify reminder survives app process death
         shell: bash
         run: |
           set -u
-          # Open Add Task.
-          adb shell input tap 935 2190 || true
-          sleep 1
-          adb shell uiautomator dump /data/local/tmp/add-dialog.xml || true
-          adb exec-out cat /data/local/tmp/add-dialog.xml > add-dialog.xml || true
-          adb exec-out screencap -p > add-dialog.png || true
-
-          # The reminder value sits at the right side of the reminder row on a 1080x2400 Pixel 6 profile.
-          adb shell input tap 890 1390 || true
-          sleep 1
-          adb shell uiautomator dump /data/local/tmp/time-picker.xml || true
-          adb exec-out cat /data/local/tmp/time-picker.xml > time-picker.xml || true
-          adb exec-out screencap -p > time-picker.png || true
-
-          # Back out without modifying user data.
-          adb shell input keyevent KEYCODE_BACK || true
+          adb shell input keyevent KEYCODE_HOME || true
           sleep 0.5
-          adb shell input keyevent KEYCODE_BACK || true
-          sleep 0.5
+          adb shell am kill com.qinghao.qingji || true
+          sleep 1
+          adb shell dumpsys alarm > alarms-after-kill.txt
+          grep -i -C 12 'com.qinghao.qingji\|QingJi' alarms-after-kill.txt > qingji-alarms-after-kill.txt || true
 
-      - name: Collect reminder diagnostics
+          echo 'waiting for QingJiReminder receiver...' | tee reminder-result.txt
+          FIRED=0
+          for i in $(seq 1 50); do
+            adb logcat -d -v brief -s QingJiReminder:I '*:S' > reminder-live.txt 2>&1 || true
+            if grep -q 'notification posted' reminder-live.txt; then
+              FIRED=1
+              echo "PASS: notification posted after app process was killed (poll=$i)." | tee -a reminder-result.txt
+              break
+            fi
+            sleep 5
+          done
+          if [ "$FIRED" -ne 1 ]; then
+            echo 'FAIL: no notification posted within test window.' | tee -a reminder-result.txt
+          fi
+
+          adb shell dumpsys notification --noredact > notifications-after.txt 2>&1 || true
+          grep -i -C 15 'com.qinghao.qingji\|CI_Reminder' notifications-after.txt > qingji-notification-after.txt || true
+          adb shell cmd statusbar expand-notifications || true
+          sleep 1
+          adb exec-out screencap -p > notification-shade.png || true
+          adb shell cmd statusbar collapse || true
+          test "$FIRED" -eq 1
+
+      - name: Collect diagnostics
         if: always()
         shell: bash
         run: |
@@ -162,10 +269,8 @@ jobs:
           grep -i -C 12 'com.qinghao.qingji\|QingJi' alarms-full.txt > alarms.txt || true
           adb shell dumpsys notification --noredact > notifications.txt 2>&1 || true
           adb shell cmd appops get com.qinghao.qingji > appops-all.txt 2>&1 || true
-          adb shell dumpsys deviceidle > deviceidle.txt 2>&1 || true
-          adb shell dumpsys activity processes | grep -i -C 8 qinghao > process.txt || true
           adb logcat -d -v time > logcat.txt 2>&1 || true
-          grep -Ei 'QingJiReminder|com\.qinghao\.qingji|AlarmManager|NotificationManager' logcat.txt > qingji-diagnostic.txt || true
+          adb logcat -d -v time -s QingJiReminder:I '*:S' > qingji-reminder.txt 2>&1 || true
 
       - name: Upload test results
         if: always()
@@ -173,25 +278,9 @@ jobs:
         with:
           name: qingji-emulator-results
           path: |
-            emulator-home.png
-            qingji-home.png
-            pull-previous.png
-            pull-next.png
-            add-dialog.png
-            time-picker.png
-            window.xml
-            add-dialog.xml
-            time-picker.xml
-            package.txt
-            appops-before.txt
-            appops-all.txt
-            alarms.txt
-            alarms-full.txt
-            notifications.txt
-            deviceidle.txt
-            process.txt
-            logcat.txt
-            qingji-diagnostic.txt
+            *.png
+            *.xml
+            *.txt
             ${{ runner.temp }}/emulator.log
           if-no-files-found: ignore
           retention-days: 3
