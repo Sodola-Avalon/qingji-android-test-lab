@@ -1,0 +1,5 @@
+QingJi V1.0.17 adversarial regression: PASS
+run_id=31952773762
+run_attempt=1
+apk_sha256=d03b0521acbc4fa7eaca1dfd988e22312c3018774646a98ad327367bf6d82310
+rounds=4
