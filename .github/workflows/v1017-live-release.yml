@@ -1,0 +1,81 @@
+name: QingJi v1.0.17 live release verification
+
+on:
+  push:
+    paths:
+      - '.github/workflows/v1017-live-release.yml'
+      - '.ci/v1.0.17/live-release.sh'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct exact tested v1.0.17 APK
+        run: |
+          set -euo pipefail
+          cat .ci/v1.0.16/patch.b64.?? | tr -d '\r\n' | base64 -d > v1016.patch.zst
+          cp QingJi-v1.0.15.apk v1015.apk
+          zstd --patch-from=v1015.apk -d -f v1016.patch.zst -o QingJi-v1.0.16.apk
+          echo '8e51e396345d5cc6a4d390bf519d7ba321eafe0c944b30ec9f671b40254ededa  QingJi-v1.0.16.apk' | sha256sum -c -
+          python3 -c "from pathlib import Path; p=Path('.ci/v1.0.17/patch.b64.01'); s=p.read_text(); assert len(s)==12000 and s[7829]=='t'; p.write_text(s[:7829]+'T'+s[7830:])"
+          cat .ci/v1.0.17/patch.b64.0[0-9] | base64 -d -i > v1017.patch.zst
+          zstd --patch-from=QingJi-v1.0.16.apk -d -f v1017.patch.zst -o QingJi-v1.0.17.apk
+          echo 'd03b0521acbc4fa7eaca1dfd988e22312c3018774646a98ad327367bf6d82310  QingJi-v1.0.17.apk' | sha256sum -c -
+
+      - name: Prepare Android 15 emulator
+        run: |
+          set -euo pipefail
+          [ ! -e /dev/kvm ] || sudo chmod 666 /dev/kvm
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort | tail -1)"
+          AVDMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name avdmanager | sort | tail -1)"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install 'platform-tools' 'emulator' 'system-images;android-35;google_apis;x86_64'
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo no | "$AVDMANAGER" create avd --force --name qingji17live --package 'system-images;android-35;google_apis;x86_64' --device 'pixel_6'
+          ACCEL='-accel off'; [ ! -e /dev/kvm ] || ACCEL='-accel on'
+          nohup "$ANDROID_HOME/emulator/emulator" -avd qingji17live -no-window -noaudio -no-boot-anim -no-snapshot -wipe-data -gpu swiftshader_indirect $ACCEL > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          adb wait-for-device
+          for i in $(seq 1 180); do [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && break; sleep 2; done
+          test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = 1
+          adb shell settings put global stay_on_while_plugged_in 3 || true
+          adb shell settings put system screen_off_timeout 1800000
+          adb shell wm size 1080x2400
+          adb shell wm density 420
+          adb shell settings put system font_scale 1.0
+          adb shell input keyevent KEYCODE_WAKEUP || true
+          adb shell wm dismiss-keyguard || true
+          adb shell input keyevent KEYCODE_HOME || true
+
+      - name: Verify live GitHub Release from QingJi
+        run: |
+          chmod +x .ci/v1.0.17/live-release.sh
+          .ci/v1.0.17/live-release.sh
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          timeout 8s adb logcat -d -v time > live-release-logcat.txt 2>&1 || true
+          sha256sum QingJi-v1.0.17.apk > live-release-candidate-sha256.txt || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qingji-v1.0.17-live-release
+          path: |
+            live-release-result.txt
+            live-release-latest.png
+            live-release-failure.png
+            live-release-logcat.txt
+            live-release-candidate-sha256.txt
+            window.xml
+            ${{ runner.temp }}/emulator.log
+          if-no-files-found: ignore
+          retention-days: 5
