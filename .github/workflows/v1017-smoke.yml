@@ -25,8 +25,9 @@ jobs:
           cp QingJi-v1.0.15.apk v1015.apk
           zstd --patch-from=v1015.apk -d -f v1016.patch.zst -o QingJi-v1.0.16.apk
           echo '8e51e396345d5cc6a4d390bf519d7ba321eafe0c944b30ec9f671b40254ededa  QingJi-v1.0.16.apk' | sha256sum -c -
+          python3 -c "from pathlib import Path; p=Path('.ci/v1.0.17/patch.b64.01'); s=p.read_text(); assert len(s)==12000 and s[7829]=='t'; p.write_text(s[:7829]+'T'+s[7830:])"
+          echo '0aa0eb591f6795af3722429480c5700e7622dde8111c7130123d81fc5cd7fb87  .ci/v1.0.17/patch.b64.01' | sha256sum -c -
           wc -c .ci/v1.0.17/patch.b64.0[0-9]
-          sha256sum .ci/v1.0.17/patch.b64.0[0-9]
           cat .ci/v1.0.17/patch.b64.0[0-9] | base64 -d -i > v1017.patch.zst
           zstd --patch-from=QingJi-v1.0.16.apk -d -f v1017.patch.zst -o QingJi-v1.0.17.apk
           echo 'd03b0521acbc4fa7eaca1dfd988e22312c3018774646a98ad327367bf6d82310  QingJi-v1.0.17.apk' | sha256sum -c -
