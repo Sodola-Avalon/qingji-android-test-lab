@@ -25,15 +25,28 @@ jobs:
             echo 'KVM is not available; emulator will use software acceleration.'
           fi
 
-      - name: Install Android 15 emulator image
+      - name: Locate Android command-line tools
         shell: bash
         run: |
           set -euo pipefail
           echo "ANDROID_HOME=$ANDROID_HOME"
-          command -v sdkmanager
-          command -v avdmanager
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager --install \
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort | tail -1)"
+          AVDMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name avdmanager | sort | tail -1)"
+          test -x "$SDKMANAGER"
+          test -x "$AVDMANAGER"
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "AVDMANAGER=$AVDMANAGER" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          echo "sdkmanager: $SDKMANAGER"
+          echo "avdmanager: $AVDMANAGER"
+
+      - name: Install Android 15 emulator image
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install \
             'platform-tools' \
             'emulator' \
             'system-images;android-35;google_apis;x86_64'
@@ -42,7 +55,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo no | avdmanager create avd \
+          echo no | "$AVDMANAGER" create avd \
             --force \
             --name qingji \
             --package 'system-images;android-35;google_apis;x86_64' \
@@ -55,7 +68,7 @@ jobs:
           set -euo pipefail
           ACCEL='-accel off'
           if [ -e /dev/kvm ]; then ACCEL='-accel on'; fi
-          nohup emulator -avd qingji \
+          nohup "$ANDROID_HOME/emulator/emulator" -avd qingji \
             -no-window -noaudio -no-boot-anim -no-snapshot -wipe-data \
             -gpu swiftshader_indirect $ACCEL \
             > "$RUNNER_TEMP/emulator.log" 2>&1 &
