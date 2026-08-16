@@ -2,7 +2,6 @@
 set -euo pipefail
 python3 <<'PY'
 from pathlib import Path
-import re
 src = Path('.ci/v1.0.16/adversarial-v3.sh').read_text()
 start = src.index('# ROUND 1 — geometry and basic page gesture feedback')
 end = src.index('# ROUND 2 — recurring delete sheet must expose both destructive scopes')
@@ -65,14 +64,36 @@ assert any(exp_next in t for t in nxt), ('up-pull did not go to next day',nxt)
 assert any(n.attrib.get('content-desc')=='返回今日' for n in ET.parse('r1-prev.xml').getroot().iter('node'))
 assert any(n.attrib.get('content-desc')=='返回今日' for n in ET.parse('r1-next.xml').getroot().iter('node'))
 P1
-# Extract frames for manual visual inspection of transient hint position.
-mkdir -p r1-prev-frames r1-next-frames
-ffmpeg -hide_banner -loglevel error -i r1-prev.mp4 -vf fps=5 r1-prev-frames/f-%02d.png || true
-ffmpeg -hide_banner -loglevel error -i r1-next.mp4 -vf fps=5 r1-next-frames/f-%02d.png || true
 echo ROUND1_PASS | tee r1-result.txt
 
 '''
-Path('/tmp/adversarial-v7.sh').write_text(src[:start] + round1 + src[end:])
+script = src[:start] + round1 + src[end:]
+# The redesigned recurring actions expose title + subtitle in one accessibility node.
+needle = 'tap_by(){ wait_by "$1" "$2"; read -r x y < <(center_by "$1" "$2"); adb shell input tap "$x" "$y"; }'
+helpers = needle + r'''
+center_contains(){
+  local v="$1"; dump_ui /tmp/ui.xml
+  python3 - "$v" <<'PYC'
+import re,sys,xml.etree.ElementTree as ET
+v=sys.argv[1]
+root=ET.parse('/tmp/ui.xml').getroot()
+for n in root.iter('node'):
+    if v in n.attrib.get('text',''):
+        m=re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',n.attrib.get('bounds',''))
+        if m:
+            x1,y1,x2,y2=map(int,m.groups()); print((x1+x2)//2,(y1+y2)//2); raise SystemExit(0)
+raise SystemExit(2)
+PYC
+}
+wait_contains(){ local v="$1" tries="${2:-30}"; for _ in $(seq 1 "$tries"); do center_contains "$v" >/dev/null 2>&1 && return 0; sleep .5; done; dump_ui wait-failed.xml; echo "WAIT CONTAINS FAILED: $v" >&2; return 1; }
+tap_contains(){ wait_contains "$1"; read -r x y < <(center_contains "$1"); adb shell input tap "$x" "$y"; }
+'''
+if needle not in script:
+    raise SystemExit('helper injection point missing')
+script = script.replace(needle, helpers, 1)
+script = script.replace("wait_by text '仅删除这一天' 20; wait_by text '停止每日重复' 5; wait_by text '取消' 5", "wait_contains '仅删除这一天' 20; wait_contains '停止每日重复' 5; wait_by text '取消' 5")
+script = script.replace("tap_by text '仅删除这一天'; sleep .7", "tap_contains '仅删除这一天'; sleep .7")
+Path('/tmp/adversarial-v7.sh').write_text(script)
 PY
 chmod +x /tmp/adversarial-v7.sh
 exec /tmp/adversarial-v7.sh
