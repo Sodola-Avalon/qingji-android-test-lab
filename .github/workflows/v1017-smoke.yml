@@ -21,7 +21,7 @@ jobs:
       - name: Reconstruct exact v1.0.16 and v1.0.17 candidates
         run: |
           set -euo pipefail
-          cat .ci/v1.0.16/patch.b64.* | tr -d '\r\n' | base64 -d > v1016.patch.zst
+          cat .ci/v1.0.16/patch.b64.?? | tr -d '\r\n' | base64 -d > v1016.patch.zst
           cp QingJi-v1.0.15.apk v1015.apk
           zstd --patch-from=v1015.apk -d -f v1016.patch.zst -o QingJi-v1.0.16.apk
           echo '8e51e396345d5cc6a4d390bf519d7ba321eafe0c944b30ec9f671b40254ededa  QingJi-v1.0.16.apk' | sha256sum -c -
