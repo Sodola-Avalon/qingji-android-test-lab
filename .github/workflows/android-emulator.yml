@@ -29,7 +29,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "ANDROID_HOME=$ANDROID_HOME"
           SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort | tail -1)"
           AVDMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name avdmanager | sort | tail -1)"
           test -x "$SDKMANAGER"
@@ -79,11 +78,16 @@ jobs:
             sleep 2
           done
           test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = '1'
-          adb shell input keyevent 82 || true
+          adb shell settings put global stay_on_while_plugged_in 3 || true
           adb shell settings put system screen_off_timeout 1800000
           adb shell wm size 1080x2400
           adb shell wm density 420
           adb shell settings put system font_scale 1.0
+          adb shell input keyevent KEYCODE_WAKEUP || true
+          adb shell wm dismiss-keyguard || true
+          adb shell input swipe 540 1900 540 500 300 || true
+          adb shell input keyevent KEYCODE_HOME || true
+          sleep 2
           adb exec-out screencap -p > emulator-home.png
           test -s emulator-home.png
           echo "Android 15 emulator booted successfully."
