@@ -40,8 +40,6 @@ jobs:
           echo "ANDROID_AVD_HOME=$HOME/.android/avd" >> "$GITHUB_ENV"
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
-          echo "sdkmanager: $SDKMANAGER"
-          echo "avdmanager: $AVDMANAGER"
 
       - name: Install Android 15 emulator image
         shell: bash
@@ -63,7 +61,6 @@ jobs:
             --package 'system-images;android-35;google_apis;x86_64' \
             --device 'pixel_6'
           "$AVDMANAGER" list avd
-          cat "$ANDROID_AVD_HOME/qingji.avd/config.ini"
 
       - name: Boot emulator
         shell: bash
@@ -87,8 +84,9 @@ jobs:
           adb shell wm size 1080x2400
           adb shell wm density 420
           adb shell settings put system font_scale 1.0
-          adb shell screencap -p /sdcard/emulator-home.png
-          adb pull /sdcard/emulator-home.png emulator-home.png
+          adb exec-out screencap -p > emulator-home.png
+          test -s emulator-home.png
+          echo "Android 15 emulator booted successfully."
 
       - name: Install and launch QingJi APK
         shell: bash
@@ -105,10 +103,10 @@ jobs:
           adb logcat -c
           adb shell monkey -p com.qinghao.qingji -c android.intent.category.LAUNCHER 1
           sleep 3
-          adb shell uiautomator dump /sdcard/window.xml || true
-          adb pull /sdcard/window.xml window.xml || true
-          adb shell screencap -p /sdcard/qingji-home.png
-          adb pull /sdcard/qingji-home.png qingji-home.png
+          adb shell uiautomator dump /data/local/tmp/window.xml || true
+          adb pull /data/local/tmp/window.xml window.xml || true
+          adb exec-out screencap -p > qingji-home.png
+          test -s qingji-home.png
           adb shell dumpsys package com.qinghao.qingji > package.txt
           adb shell dumpsys alarm | grep -i -C 8 qingji > alarms.txt || true
           adb logcat -d -v time > logcat.txt
