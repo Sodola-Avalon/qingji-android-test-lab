@@ -1,0 +1,22 @@
+name: Export v1.0.17 patch chunk 01
+
+on:
+  push:
+    paths:
+      - '.github/workflows/export-v1017-chunk01.yml'
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show checksum
+        run: |
+          wc -c .ci/v1.0.17/patch.b64.01
+          sha256sum .ci/v1.0.17/patch.b64.01
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v1017-chunk01-from-github
+          path: .ci/v1.0.17/patch.b64.01
+          retention-days: 1
