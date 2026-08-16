@@ -1,0 +1,24 @@
+name: Export verified QingJi v1.0.16
+
+on:
+  push:
+    paths:
+      - '.github/workflows/export-v1016.yml'
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct exact tested APK
+        run: |
+          set -euo pipefail
+          cat .ci/v1.0.16/patch.b64.?? | tr -d '\r\n' | base64 -d > candidate.patch.zst
+          zstd --patch-from=QingJi-v1.0.15.apk -d -f candidate.patch.zst -o QingJi-v1.0.16.apk
+          echo '8e51e396345d5cc6a4d390bf519d7ba321eafe0c944b30ec9f671b40254ededa  QingJi-v1.0.16.apk' | sha256sum -c -
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QingJi-v1.0.16-verified-apk
+          path: QingJi-v1.0.16.apk
+          retention-days: 5
