@@ -90,32 +90,84 @@ jobs:
           sleep 2
           adb exec-out screencap -p > emulator-home.png
           test -s emulator-home.png
-          echo "Android 15 emulator booted successfully."
 
       - name: Install and launch QingJi APK
         shell: bash
         run: |
           set -euo pipefail
           APK="$(find . -maxdepth 2 -type f -name '*.apk' | head -1 || true)"
-          if [ -z "$APK" ]; then
-            echo 'No APK is present in the repository yet. Emulator boot test passed.'
-            exit 0
-          fi
+          test -n "$APK"
           echo "Testing APK: $APK"
           adb install -r "$APK"
           adb shell pm grant com.qinghao.qingji android.permission.POST_NOTIFICATIONS || true
+          adb shell cmd appops get com.qinghao.qingji SCHEDULE_EXACT_ALARM > appops-before.txt 2>&1 || true
           adb logcat -c
           adb shell monkey -p com.qinghao.qingji -c android.intent.category.LAUNCHER 1
           sleep 3
           adb shell uiautomator dump /data/local/tmp/window.xml || true
-          adb pull /data/local/tmp/window.xml window.xml || true
+          adb exec-out cat /data/local/tmp/window.xml > window.xml || true
           adb exec-out screencap -p > qingji-home.png
           test -s qingji-home.png
-          adb shell dumpsys package com.qinghao.qingji > package.txt
-          adb shell dumpsys alarm | grep -i -C 8 qingji > alarms.txt || true
-          adb logcat -d -v time > logcat.txt
 
-      - name: Upload small test results
+      - name: Exercise vertical paging preview
+        shell: bash
+        run: |
+          set -u
+          # Pull down: previous day. Keep finger down while taking the screenshot.
+          adb shell input motionevent DOWN 540 900 || true
+          adb shell input motionevent MOVE 540 1280 || true
+          sleep 0.25
+          adb exec-out screencap -p > pull-previous.png || true
+          adb shell input motionevent UP 540 1280 || true
+          sleep 1
+
+          # Pull up: next day. Keep finger down while taking the screenshot.
+          adb shell input motionevent DOWN 540 1550 || true
+          adb shell input motionevent MOVE 540 1170 || true
+          sleep 0.25
+          adb exec-out screencap -p > pull-next.png || true
+          adb shell input motionevent UP 540 1170 || true
+          sleep 1
+
+      - name: Inspect add-task and reminder dialogs
+        shell: bash
+        run: |
+          set -u
+          # Open Add Task.
+          adb shell input tap 935 2190 || true
+          sleep 1
+          adb shell uiautomator dump /data/local/tmp/add-dialog.xml || true
+          adb exec-out cat /data/local/tmp/add-dialog.xml > add-dialog.xml || true
+          adb exec-out screencap -p > add-dialog.png || true
+
+          # The reminder value sits at the right side of the reminder row on a 1080x2400 Pixel 6 profile.
+          adb shell input tap 890 1390 || true
+          sleep 1
+          adb shell uiautomator dump /data/local/tmp/time-picker.xml || true
+          adb exec-out cat /data/local/tmp/time-picker.xml > time-picker.xml || true
+          adb exec-out screencap -p > time-picker.png || true
+
+          # Back out without modifying user data.
+          adb shell input keyevent KEYCODE_BACK || true
+          sleep 0.5
+          adb shell input keyevent KEYCODE_BACK || true
+          sleep 0.5
+
+      - name: Collect reminder diagnostics
+        if: always()
+        shell: bash
+        run: |
+          adb shell dumpsys package com.qinghao.qingji > package.txt 2>&1 || true
+          adb shell dumpsys alarm > alarms-full.txt 2>&1 || true
+          grep -i -C 12 'com.qinghao.qingji\|QingJi' alarms-full.txt > alarms.txt || true
+          adb shell dumpsys notification --noredact > notifications.txt 2>&1 || true
+          adb shell cmd appops get com.qinghao.qingji > appops-all.txt 2>&1 || true
+          adb shell dumpsys deviceidle > deviceidle.txt 2>&1 || true
+          adb shell dumpsys activity processes | grep -i -C 8 qinghao > process.txt || true
+          adb logcat -d -v time > logcat.txt 2>&1 || true
+          grep -Ei 'QingJiReminder|com\.qinghao\.qingji|AlarmManager|NotificationManager' logcat.txt > qingji-diagnostic.txt || true
+
+      - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -123,10 +175,23 @@ jobs:
           path: |
             emulator-home.png
             qingji-home.png
+            pull-previous.png
+            pull-next.png
+            add-dialog.png
+            time-picker.png
             window.xml
+            add-dialog.xml
+            time-picker.xml
             package.txt
+            appops-before.txt
+            appops-all.txt
             alarms.txt
+            alarms-full.txt
+            notifications.txt
+            deviceidle.txt
+            process.txt
             logcat.txt
+            qingji-diagnostic.txt
             ${{ runner.temp }}/emulator.log
           if-no-files-found: ignore
           retention-days: 3
