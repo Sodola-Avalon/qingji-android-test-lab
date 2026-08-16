@@ -79,6 +79,11 @@ jobs:
           name: qingji-v1.0.17-smoke
           path: |
             result.txt
+            stage.txt
+            stage-*.xml
+            stage-*.png
+            wait-failed.xml
+            window.xml
             update-channel-result.png
             failure.png
             logcat.txt
