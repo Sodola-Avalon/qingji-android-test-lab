@@ -34,8 +34,10 @@ jobs:
           AVDMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name avdmanager | sort | tail -1)"
           test -x "$SDKMANAGER"
           test -x "$AVDMANAGER"
+          mkdir -p "$HOME/.android/avd"
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
           echo "AVDMANAGER=$AVDMANAGER" >> "$GITHUB_ENV"
+          echo "ANDROID_AVD_HOME=$HOME/.android/avd" >> "$GITHUB_ENV"
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
           echo "sdkmanager: $SDKMANAGER"
@@ -60,7 +62,8 @@ jobs:
             --name qingji \
             --package 'system-images;android-35;google_apis;x86_64' \
             --device 'pixel_6'
-          cat "$HOME/.android/avd/qingji.avd/config.ini"
+          "$AVDMANAGER" list avd
+          cat "$ANDROID_AVD_HOME/qingji.avd/config.ini"
 
       - name: Boot emulator
         shell: bash
